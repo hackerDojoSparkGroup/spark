@@ -28,7 +28,7 @@ import org.apache.spark.sql.SQLContext
 object LogisticRegressionWithCDExample {
 
   def main(args: Array[String]) {
-    val conf = new SparkConf().setAppName("LogisticRegressionWithCDExample").setMaster("local[2]")
+    val conf = new SparkConf().setAppName("LogisticRegressionWithCDExample")
     val sc = new SparkContext(conf)
     val sqlContext = new SQLContext(sc)
     import sqlContext.implicits._
