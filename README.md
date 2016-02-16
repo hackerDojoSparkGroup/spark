@@ -1,3 +1,40 @@
+# Spark-GLMNET
+
+This branch contains implementations of the “Regularization Paths for Generalized Linear Models via Coordinate Descent” algorithm by Jerome Friedman, Trevor Hastie and Rob Tibshirani of Stanford University (http://web.stanford.edu/~hastie/Papers/glmnet.pdf). The algorithm is typically referred to as “glmnet” - generalized linear model with elastic net regularization. Elastic net is the combination of the ridge and lasso regularization methods. This algorithm is generally faster than traditional methods such as linear regression and is particularly well suited for “fat” datasets (many more features than events).
+
+## Building Spark
+
+Spark is built using [Apache Maven](http://maven.apache.org/).
+To build Spark and its example programs, run:
+
+    export MAVEN_OPTS="-Xmx2g -XX:MaxPermSize=512M -XX:ReservedCodeCacheSize=512m"
+    build/mvn -DskipTests clean package
+
+## Example Programs
+
+There are three sample programs for Spark-GLMNET in the `examples/ml` directory.
+* LinearRegressionWithCDExample - Produces a single model using linear regression with coordinate descent
+* LogisticRegressionWithCDExample - Produces a single model using logistic regression with coordinate descent
+* LinearRegressionWithCDCrossValidatorExample - Produces a best-fit model using cross-validation with auto-generated lambda parameter values and linear regression with coordinate descent.
+
+To run one of them, use `./bin/run-example <class> [params]`. For example:
+
+    ./bin/run-example ml.LinearRegressionWithCDExample
+
+will run the LinearRegressionWithCDExample example locally.
+
+You can set the MASTER environment variable when running examples to submit
+examples to a cluster. This can be a mesos:// or spark:// URL,
+"yarn" to run on YARN, and "local" to run
+locally with one thread, or "local[N]" to run locally with N threads. You
+can also use an abbreviated class name if the class is in the `examples`
+package. For instance:
+
+    MASTER=spark://host:7077 ./bin/run-example SparkPi
+
+Many of the example programs print usage help if no params are given.
+
+
 # Apache Spark
 
 Spark is a fast and general cluster computing system for Big Data. It provides
