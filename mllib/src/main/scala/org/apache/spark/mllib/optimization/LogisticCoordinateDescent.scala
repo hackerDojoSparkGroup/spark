@@ -17,6 +17,7 @@
 
 package org.apache.spark.mllib.optimization
 
+import breeze.linalg.{ DenseMatrix, DenseVector }
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.Logging
 import org.apache.spark.ml.classification.Stats3
@@ -185,10 +186,12 @@ object LogisticCoordinateDescent extends Logging {
     //take pass through data to calculate averages over data require for iteration
     //initilize accumulators
 
+    val (wXX, wX, wXz, wZ, wSum) = calcOuter(xNormalized, labels, beta0, oldBeta)
+
     def loop(iterIRLS: Int, betaIRLS: Array[Double], distIRLS: Double): Array[Double] = {
       if (distIRLS <= 0.01) betaIRLS
       else {
-        val (newBetaIRLS, newDistIRLS) = middleLoop(iStep, iterIRLS, labels, xNormalized, betaIRLS, beta0, lambda, alpha, numColumns, numRows)
+        val (newBetaIRLS, newDistIRLS) = middleLoop(iStep, iterIRLS, labels, xNormalized, betaIRLS, beta0, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
         loop(0, newBetaIRLS, newDistIRLS)
       }
     }
@@ -196,17 +199,17 @@ object LogisticCoordinateDescent extends Logging {
     loop(0, oldBeta, 100.0)
   }
 
-  private def middleLoop(iStep: Int, iterIRLS: Int, labels: Array[Double], xNormalized: Array[Array[Double]], betaIRLS: Array[Double], beta0IRLS: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Array[Double], Double) = {
+  private def middleLoop(iStep: Int, iterIRLS: Int, labels: Array[Double], xNormalized: Array[Array[Double]], betaIRLS: Array[Double], beta0IRLS: Double, wXX: DenseMatrix[Double], wX: DenseVector[Double], wXz: DenseVector[Double], wZ: Double, wSum: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Array[Double], Double) = {
     @tailrec
-    def loop(iterInner: Int, distInner: Double, oldBeta0Inner: Double, mutableBetaInner: Array[Double]): (Int, Array[Double]) = {
-      if (iterInner >= 100 || distInner <= 0.01) (iterInner, mutableBetaInner)
+    def loop(iterInner: Int, distInner: Double, oldBeta0Inner: Double, mutableBetaInner: DenseVector[Double]): (Int, Array[Double]) = {
+      if (iterInner >= 100 || distInner <= 0.01) (iterInner, mutableBetaInner.toArray)
       else {
-        val (newDistInner, newBeta0Inner) = innerLoop(labels, xNormalized, mutableBetaInner, oldBeta0Inner, beta0IRLS, betaIRLS, lambda, alpha, numColumns, numRows)
+        val (newDistInner, newBeta0Inner) = innerLoop(labels, xNormalized, mutableBetaInner, oldBeta0Inner, beta0IRLS, betaIRLS, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
         loop(iterInner + 1, newDistInner, newBeta0Inner, mutableBetaInner)
       }
     }
 
-    val (iterInner, betaInner) = loop(0, 100.0, beta0IRLS, betaIRLS.clone)
+    val (iterInner, betaInner) = loop(0, 100.0, beta0IRLS, DenseVector(betaIRLS.clone))
 
     println(iStep, iterIRLS, iterInner)
 
@@ -222,7 +225,7 @@ object LogisticCoordinateDescent extends Logging {
   }
 
   /** The betaInner input parameter will be mutated. */
-  private def innerLoop(labels: Array[Double], xNormalized: Array[Array[Double]], betaInner: Array[Double], oldBeta0Inner: Double, beta0IRLS: Double, betaIRLS: Array[Double], lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Double, Double) = {
+  private def innerLoop(labels: Array[Double], xNormalized: Array[Array[Double]], betaInner: DenseVector[Double], oldBeta0Inner: Double, beta0IRLS: Double, betaIRLS: Array[Double], wXX: DenseMatrix[Double], wX: DenseVector[Double], wXz: DenseVector[Double], wZ: Double, wSum: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Double, Double) = {
     val nrow = numRows.toInt
     val ncol = numColumns
 
@@ -230,32 +233,17 @@ object LogisticCoordinateDescent extends Logging {
 
     //cycle through attributes and update one-at-a-time
     //record starting value for comparison
-    val betaStart = betaInner.clone
+    val betaStart = betaInner.toArray.clone
     for (iCol <- 0 until ncol) {
-      var sumWxrC = 0.0
-      var sumWxxC = 0.0
-      var sumWr = 0.0
-      var sumW = 0.0
+      val sumWxrC = wXz(iCol) - wX(iCol) * beta0Inner - (wXX(::, iCol) dot betaInner)
+      val sumWxxC = wXX(iCol, iCol)
+      val sumWrC = wZ - wSum * beta0Inner - (wX dot betaInner)
+      val sumWC = wSum
 
-      for (iRow <- 0 until nrow) {
-        val x = xNormalized(iRow).clone
-        val y = labels(iRow)
-        val pr = Pr(beta0IRLS, betaIRLS, x)
-        val (p, w) = if (abs(pr) < 1e-5) (0.0, 1e-5)
-        else if (abs(1.0 - pr) < 1e-5) (1.0, 1e-5)
-        else (pr, pr * (1.0 - pr))
-        val z = (y - p) / w + beta0IRLS + (for (i <- 0 until ncol) yield (x(i) * betaIRLS(i))).sum
-        val r = z - beta0Inner - (for (i <- 0 until ncol) yield (x(i) * betaInner(i))).sum
-        sumWxrC += w * x(iCol) * r
-        sumWxxC += w * x(iCol) * x(iCol)
-        sumWr += w * r
-        sumW += w
-        //println(s"sumWxrC: ${sumWxrC}, sumWxxC: ${sumWxxC}, sumWr: ${sumWr}, sumW: ${sumW}")              
-      }
       val avgWxr = sumWxrC / nrow
       val avgWxx = sumWxxC / nrow
 
-      beta0Inner = beta0Inner + sumWr / sumW
+      beta0Inner = beta0Inner + sumWrC / sumWC
       //println(s"beta0Inner: ${beta0Inner}")
       val uncBeta = avgWxr + avgWxx * betaInner(iCol)
       betaInner(iCol) = S(uncBeta, lambda * alpha) / (avgWxx + lambda * (1.0 - alpha))
@@ -281,6 +269,40 @@ object LogisticCoordinateDescent extends Logging {
       sum = if (sum < -100) -100 else sum
     }
     1.0 / (1.0 + exp(-sum))
+  }
+
+  // performs adjustments recommended by Friedman for numerical stability
+  def adjPW(b0: Double, b: Array[Double], x: Array[Double]): (Double, Double) = {
+    val pr = Pr(b0, b, x)
+    if (abs(pr) < 1e-5) (0.0, 1e-5)
+    else if (abs(1.0 - pr) < 1e-5) (1.0, 1e-5)
+    else (pr, pr * (1.0 - pr))
+  }
+
+  def calcOuter(X: Array[Array[Double]], Y: Array[Double], beta0: Double, beta: Array[Double]) = {
+    val nRow = X.length
+    val nCol = X(0).length
+
+    var wXX = DenseMatrix.zeros[Double](nCol, nCol)
+    var wX = DenseVector.zeros[Double](nCol)
+    var wXz = DenseVector.zeros[Double](nCol)
+    var wZ = 0.0
+    var wSum = 0.0
+
+    for (iRow <- 0 until nRow) {
+      val y = Y(iRow)
+      val x = X(iRow)
+      val (p, w) = adjPW(beta0, beta, x)
+      val xNP = DenseVector(x)
+      wXX += w * (xNP * xNP.t)
+      wX += w * xNP
+      // residual for logistic
+      val z = (y - p) / w + beta0 + (for (i <- 0 until nCol) yield (x(i) * beta(i))).sum
+      wXz += w * xNP * z
+      wZ += w * z
+      wSum += w
+    }
+    (wXX, wX, wXz, wZ, wSum)
   }
 
   private def determineColumnOrder(betas: List[Vector]): Array[Int] = {

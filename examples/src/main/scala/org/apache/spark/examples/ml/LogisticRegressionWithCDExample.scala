@@ -38,7 +38,7 @@ object LogisticRegressionWithCDExample {
 
     val lr = new LogisticRegressionWithCD("")
     lr.setMaxIter(100)
-      .setElasticNetParam(1.0)
+      .setElasticNetParam(0.8)
 
     val model = lr.fit(training.toDF())
 

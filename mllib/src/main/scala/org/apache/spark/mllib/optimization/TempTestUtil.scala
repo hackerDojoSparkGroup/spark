@@ -41,7 +41,7 @@ object TempTestUtil {
     val expectedYSD = FileUtil.readFile("results/logistic-regression/ySDwithBesselsCorrection.txt")(0).toDouble
     TestUtil.equalWithinTolerance(sdLabel, expectedYSD, tolerance, "ySD")
 
-    val expectedBetaMat = FileUtil.readFile("results/logistic-regression/betaMatWithBesselsCorrection.txt")
+    val expectedBetaMat = FileUtil.readFile("results/logistic-regression/betaMatWithBesselsCorrectionV2.txt")
       .map(_.split(",").map(_.toDouble)).toArray
     TestUtil.equalWithinTolerance(betaMat.toArray, expectedBetaMat, tolerance, "betas")
 
@@ -53,7 +53,7 @@ object TempTestUtil {
   }
 
   def verifyResults(nameList: List[String]) = {
-    val expectedNamelist = FileUtil.readFile("results/logistic-regression/namelist.txt")(0)
+    val expectedNamelist = FileUtil.readFile("results/logistic-regression/namelistV2.txt")(0)
       .split(",").map(_.trim).toArray
     TestUtil.equal(nameList.toArray, expectedNamelist, "columnOrder")
 
