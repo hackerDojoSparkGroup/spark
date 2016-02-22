@@ -114,18 +114,16 @@ class LogisticRegressionWithCD(override val uid: String)
     fit(dataset, fitSingleModel)(0)
   }
 
-  private def newOptimizer = new LogisticCoordinateDescent
-
-  private val fitMultiModel = (normalizedInstances: RDD[(Double, Vector)], initialWeights: Vector, xy: Array[Double], numRows: Long, stats: Stats3, paramMaps: Array[ParamMap]) => {
+  private val fitMultiModel = (normalizedInstances: RDD[(Double, Vector)], initialWeights: Vector, numRows: Long, stats: Stats3, paramMaps: Array[ParamMap]) => {
     val boundaryIndices = new Range(0, paramMaps.length, $(numLambdas))
     val models = new MutableList[LogisticRegressionWithCDModel]
 
     boundaryIndices.foreach(index => {
-      val optimizer = newOptimizer
+      val optimizer = new LogisticCoordinateDescent
       copyValues(optimizer)
       copyValues(optimizer, paramMaps(index))
 
-      val (lambdas, rawWeights) = optimizer.optimize(normalizedInstances, initialWeights, xy, stats, numRows).unzip
+      val (lambdas, rawWeights) = optimizer.optimize(normalizedInstances, initialWeights, stats, numRows).unzip
       //rawWeights.foreach { rw => logDebug(s"Raw Weights ${rw.toArray.mkString(",")}") }
 
       models ++= rawWeights.map(rw => createModel(rw.toArray, stats))
@@ -134,18 +132,17 @@ class LogisticRegressionWithCD(override val uid: String)
     models
   }
 
-  private val fitSingleModel = (normalizedInstances: RDD[(Double, Vector)], initialWeights: Vector, xy: Array[Double], numRows: Long, stats: Stats3, paramMaps: Array[ParamMap]) => {
-    val optimizer = newOptimizer
+  private val fitSingleModel = (normalizedInstances: RDD[(Double, Vector)], initialWeights: Vector, numRows: Long, stats: Stats3, paramMaps: Array[ParamMap]) => {
+    val optimizer = new LogisticCoordinateDescent
     copyValues(optimizer)
 
     logDebug(s"Best fit lambda index: ${$(lambdaIndex)}")
-    //val rawWeights = optimizer.optimize(normalizedInstances, initialWeights, xy, $(lambdaIndex), stats.numFeatures, numRows).toArray
-    val rawWeights = optimizer.optimize(normalizedInstances, initialWeights, xy, stats, numRows)($(lambdaIndex))._2.toArray
+    val rawWeights = optimizer.optimize(normalizedInstances, initialWeights, stats, numRows)($(lambdaIndex))._2.toArray
     val model = createModel(rawWeights, stats)
     Seq(model)
   }
 
-  private def fit(dataset: DataFrame, f: (RDD[(Double, Vector)], Vector, Array[Double], Long, Stats3, Array[ParamMap]) => Seq[LogisticRegressionWithCDModel], paramMaps: Array[ParamMap] = Array()): Seq[LogisticRegressionWithCDModel] = {
+  private def fit(dataset: DataFrame, f: (RDD[(Double, Vector)], Vector, Long, Stats3, Array[ParamMap]) => Seq[LogisticRegressionWithCDModel], paramMaps: Array[ParamMap] = Array()): Seq[LogisticRegressionWithCDModel] = {
 
     val (normalizedInstances, stats) = normalizeDataSet(dataset)
     val handlePersistence = dataset.rdd.getStorageLevel == StorageLevel.NONE
@@ -161,10 +158,7 @@ class LogisticRegressionWithCD(override val uid: String)
     val numRows = normalizedInstances.count
     val initialWeights = Vectors.zeros(stats.numFeatures)
 
-    val xy = newOptimizer.computeXY(normalizedInstances, stats.numFeatures, numRows)
-    logDebug(s"xy: ${xy.mkString(",")}")
-
-    val models = f(normalizedInstances, initialWeights, xy, numRows, stats, paramMaps)
+    val models = f(normalizedInstances, initialWeights, numRows, stats, paramMaps)
 
     if (handlePersistence) normalizedInstances.unpersist()
 

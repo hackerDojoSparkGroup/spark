@@ -32,12 +32,10 @@ import TempTestUtil.verifyResults
 private[spark] class LogisticCoordinateDescent extends CoordinateDescentParams
   with Logging {
 
-  def optimize(data: RDD[(Double, Vector)], initialWeights: Vector, xy: Array[Double], stats: Stats3, numRows: Long): List[(Double, Vector)] = {
-    println("\nExecuting LogisticCoordinateDescent\n")
+  def optimize(data: RDD[(Double, Vector)], initialWeights: Vector, stats: Stats3, numRows: Long): List[(Double, Vector)] = {
     LogisticCoordinateDescent.runCD(
       data,
       initialWeights,
-      xy,
       elasticNetParam,
       lambdaShrink,
       numLambdas,
@@ -45,12 +43,6 @@ private[spark] class LogisticCoordinateDescent extends CoordinateDescentParams
       tol,
       stats,
       numRows)
-  }
-
-  //TODO - Temporary to allow testing multiple versions of CoordinateDescent with minimum code duplication - remove to Object method only later
-  def computeXY(data: RDD[(Double, Vector)], numFeatures: Int, numRows: Long): Array[Double] = {
-    //CoordinateDescent.computeXY(data, numFeatures, numRows)
-    Array.ofDim[Double](100)
   }
 }
 
@@ -61,7 +53,7 @@ private[spark] class LogisticCoordinateDescent extends CoordinateDescentParams
 @DeveloperApi
 object LogisticCoordinateDescent extends Logging {
 
-  def runCD(data: RDD[(Double, Vector)], initialWeights: Vector, xy: Array[Double], alpha: Double, lamShrnk: Double, numLambdas: Int, maxIter: Int, tol: Double, stats: Stats3, numRows: Long): List[(Double, Vector)] = {
+  def runCD(data: RDD[(Double, Vector)], initialWeights: Vector, alpha: Double, lamShrnk: Double, numLambdas: Int, maxIter: Int, tol: Double, stats: Stats3, numRows: Long): List[(Double, Vector)] = {
     logInfo(s"Performing coordinate descent with: [elasticNetParam: $alpha, lamShrnk: $lamShrnk, numLambdas: $numLambdas, maxIter: $maxIter, tol: $tol]")
 
     val (labelsSeq, xNormalizedSeq) = data.collect.unzip
@@ -70,7 +62,6 @@ object LogisticCoordinateDescent extends Logging {
     val lamMult = 0.93
 
     val (lambdas, initialBeta0) = computeLambdasAndInitialBeta0(labels, xNormalized, alpha, lamMult, numLambdas, stats, numRows)
-    // optimize(data, initialWeights, xy, lambdas, alpha, lamShrnk, maxIter, tol, numFeatures, numRows)
     val lambdasAndBetas = optimize(labels, xNormalized, lambdas, initialBeta0, alpha, stats, numRows)
 
     //TODO - Return the column order and put that into the model as part of the history. Or better yet, 
@@ -79,8 +70,6 @@ object LogisticCoordinateDescent extends Logging {
     lambdasAndBetas
   }
 
-  //private def computeLambdas(xy: Array[Double], alpha: Double, lamShrnk: Double, lambdaRange: Int, numLambdas: Int, numRows: Long): Array[Double] = {
-  //private def computeLambdasAndInitialBeta0(lamdaInit: Double, lambdaMult: Double, numLambdas: Int, stats: Stats3, numRows: Long): Array[Double] = {
   private def computeLambdasAndInitialBeta0(labels: Array[Double], xNormalized: Array[Array[Double]], alpha: Double, lambdaMult: Double, numLambdas: Int, stats: Stats3, numRows: Long): (Array[Double], Double) = {
     //logDebug(s"alpha: $alpha, lamShrnk: $lamShrnk, maxIter: $lambdaRange, numRows: $numRows")
 
@@ -114,7 +103,6 @@ object LogisticCoordinateDescent extends Logging {
 
     // val lambdaMult = 0.93 //100 steps gives reduction by factor of 1000 in lambda (recommended by authors)
 
-    //TODO - The following Array.iterate method can be used in the other CoordinateDescent objects to replace 13 lines of code with 1 line
     val lambdas = Array.iterate[Double](lamdaInit * lambdaMult, numLambdas)(_ * lambdaMult)
     (lambdas, beta0)
   }
@@ -191,7 +179,7 @@ object LogisticCoordinateDescent extends Logging {
     def loop(iterIRLS: Int, betaIRLS: Array[Double], distIRLS: Double): Array[Double] = {
       if (distIRLS <= 0.01) betaIRLS
       else {
-        val (newBetaIRLS, newDistIRLS) = middleLoop(iStep, iterIRLS, labels, xNormalized, betaIRLS, beta0, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
+        val (newBetaIRLS, newDistIRLS) = middleLoop(iStep, iterIRLS, betaIRLS, beta0, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
         loop(0, newBetaIRLS, newDistIRLS)
       }
     }
@@ -199,12 +187,12 @@ object LogisticCoordinateDescent extends Logging {
     loop(0, oldBeta, 100.0)
   }
 
-  private def middleLoop(iStep: Int, iterIRLS: Int, labels: Array[Double], xNormalized: Array[Array[Double]], betaIRLS: Array[Double], beta0IRLS: Double, wXX: DenseMatrix[Double], wX: DenseVector[Double], wXz: DenseVector[Double], wZ: Double, wSum: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Array[Double], Double) = {
+  private def middleLoop(iStep: Int, iterIRLS: Int, betaIRLS: Array[Double], beta0IRLS: Double, wXX: DenseMatrix[Double], wX: DenseVector[Double], wXz: DenseVector[Double], wZ: Double, wSum: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Array[Double], Double) = {
     @tailrec
     def loop(iterInner: Int, distInner: Double, oldBeta0Inner: Double, mutableBetaInner: DenseVector[Double]): (Int, Array[Double]) = {
       if (iterInner >= 100 || distInner <= 0.01) (iterInner, mutableBetaInner.toArray)
       else {
-        val (newDistInner, newBeta0Inner) = innerLoop(labels, xNormalized, mutableBetaInner, oldBeta0Inner, beta0IRLS, betaIRLS, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
+        val (newDistInner, newBeta0Inner) = innerLoop(mutableBetaInner, oldBeta0Inner, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
         loop(iterInner + 1, newDistInner, newBeta0Inner, mutableBetaInner)
       }
     }
@@ -218,39 +206,30 @@ object LogisticCoordinateDescent extends Logging {
     val b = (for (i <- 0 until numColumns) yield abs(betaIRLS(i))).sum
     val distIRLS = a / (b + 0.0001)
     val dBeta = for (i <- 0 until numColumns) yield (betaInner(i) - betaIRLS(i))
-    //val gradStep = 1.0
-    //val newBetaIRLS = for (i <- 0 until numColumns) yield (betaIRLS(i) + gradStep * dBeta(i))
     val newBetaIRLS = for (i <- 0 until numColumns) yield (betaIRLS(i) + dBeta(i))
     (newBetaIRLS.toArray, distIRLS)
   }
 
   /** The betaInner input parameter will be mutated. */
-  private def innerLoop(labels: Array[Double], xNormalized: Array[Array[Double]], betaInner: DenseVector[Double], oldBeta0Inner: Double, beta0IRLS: Double, betaIRLS: Array[Double], wXX: DenseMatrix[Double], wX: DenseVector[Double], wXz: DenseVector[Double], wZ: Double, wSum: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Double, Double) = {
-    val nrow = numRows.toInt
-    val ncol = numColumns
-
+  private def innerLoop(betaInner: DenseVector[Double], oldBeta0Inner: Double, wXX: DenseMatrix[Double], wX: DenseVector[Double], wXz: DenseVector[Double], wZ: Double, wSum: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): (Double, Double) = {
     var beta0Inner = oldBeta0Inner
 
     //cycle through attributes and update one-at-a-time
     //record starting value for comparison
     val betaStart = betaInner.toArray.clone
-    for (iCol <- 0 until ncol) {
+    for (iCol <- 0 until numColumns) {
       val sumWxrC = wXz(iCol) - wX(iCol) * beta0Inner - (wXX(::, iCol) dot betaInner)
-      val sumWxxC = wXX(iCol, iCol)
       val sumWrC = wZ - wSum * beta0Inner - (wX dot betaInner)
-      val sumWC = wSum
 
-      val avgWxr = sumWxrC / nrow
-      val avgWxx = sumWxxC / nrow
+      val avgWxr = sumWxrC / numRows
+      val avgWxx = wXX(iCol, iCol) / numRows
 
-      beta0Inner = beta0Inner + sumWrC / sumWC
-      //println(s"beta0Inner: ${beta0Inner}")
+      beta0Inner = beta0Inner + sumWrC / wSum
       val uncBeta = avgWxr + avgWxx * betaInner(iCol)
       betaInner(iCol) = S(uncBeta, lambda * alpha) / (avgWxx + lambda * (1.0 - alpha))
-      //println(s"betaInner(iCol): ${betaInner(iCol)}")
     }
-    val sumDiff = (for (n <- 0 until ncol) yield (abs(betaInner(n) - betaStart(n)))).sum
-    val sumBeta = (for (n <- 0 until ncol) yield abs(betaInner(n))).sum
+    val sumDiff = (for (n <- 0 until numColumns) yield (abs(betaInner(n) - betaStart(n)))).sum
+    val sumBeta = (for (n <- 0 until numColumns) yield abs(betaInner(n))).sum
     val distInner = sumDiff / sumBeta
 
     (distInner, beta0Inner)
