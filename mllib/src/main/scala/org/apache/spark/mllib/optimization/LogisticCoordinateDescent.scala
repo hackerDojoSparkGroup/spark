@@ -19,6 +19,7 @@ package org.apache.spark.mllib.optimization
 
 import breeze.linalg.{ DenseMatrix, DenseVector }
 import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.mllib.linalg.BLAS
 import org.apache.spark.Logging
 import org.apache.spark.ml.classification.Stats3
 import org.apache.spark.mllib.linalg.{ Vector, Vectors }
@@ -61,7 +62,7 @@ object LogisticCoordinateDescent extends Logging {
     val xNormalized = xNormalizedSeq.map(_.toArray).toArray
     val lamMult = 0.93
 
-    val (lambdas, initialBeta0) = computeLambdasAndInitialBeta0(labels, xNormalized, alpha, lamMult, numLambdas, stats, numRows)
+    val (lambdas, initialBeta0) = computeLambdasAndInitialBeta0(data, alpha, lamMult, numLambdas, stats, numRows)
     val lambdasAndBetas = optimize(labels, xNormalized, lambdas, initialBeta0, alpha, stats, numRows)
 
     //TODO - Return the column order and put that into the model as part of the history. Or better yet, 
@@ -70,63 +71,51 @@ object LogisticCoordinateDescent extends Logging {
     lambdasAndBetas
   }
 
-  private def computeLambdasAndInitialBeta0(labels: Array[Double], xNormalized: Array[Array[Double]], alpha: Double, lambdaMult: Double, numLambdas: Int, stats: Stats3, numRows: Long): (Array[Double], Double) = {
+  private def computeLambdasAndInitialBeta0(data: RDD[(Double, Vector)], alpha: Double, lambdaMult: Double, numLambdas: Int, stats: Stats3, numRows: Long): (Array[Double], Double) = {
     //logDebug(s"alpha: $alpha, lamShrnk: $lamShrnk, maxIter: $lambdaRange, numRows: $numRows")
 
-    //    val maxXY = xy.map(abs).max(Ordering.Double)
-    //    val lambdaInit = maxXY / alpha
-    //
-    //    val lambdaMult = exp(scala.math.log(lamShrnk) / lambdaRange)
-    //    
-    //---------------------------------------------------------------------------------------------------
+    val p = stats.yMean
+    val w = p * (1.0 - p)
+    val sumW = w * numRows
 
-    val nrow = numRows.toInt
-    val ncol = stats.numFeatures
-    val meanLabel = stats.yMean
+    val initialWeights = data.treeAggregate(new ComputeInitialWeights(p, stats.numFeatures))(
+      (aggregate, row) => aggregate.compute(row),
+      (aggregate1, aggregate2) => aggregate1.combine(aggregate2))
 
-    //calculate starting points for betas
-    val (sumWxr, sumWxx, sumWr, sumW) = new ComputeInitialWeights(meanLabel).aggregate(labels, xNormalized, nrow, ncol)
+    val sumWxr = initialWeights.sumWxr
+    val sumWr = initialWeights.sumWr
 
-    val avgWxr = for (i <- 0 until ncol) yield sumWxr(i) / nrow
-    val avgWxx = for (i <- 0 until ncol) yield sumWxx(i) / nrow
-
-    var maxWxr = 0.0
-    for (i <- 0 until ncol) {
-      val value = abs(avgWxr(i))
-      maxWxr = if (value > maxWxr) value else maxWxr
-    }
-    //calculate starting value for lambda
+    val avgWxr = sumWxr.toBreeze / numRows.toDouble
+    val maxWxr = avgWxr.map(abs).max(Ordering.Double)
+    
+    // calculate starting value for lambda
     val lamdaInit = maxWxr / alpha
 
-    //this value of lambda corresponds to beta = list of 0's
+    // the lamdaInit value of lambda corresponds to a beta of all 0's
     val beta0 = sumWr / sumW
-
-    // val lambdaMult = 0.93 //100 steps gives reduction by factor of 1000 in lambda (recommended by authors)
 
     val lambdas = Array.iterate[Double](lamdaInit * lambdaMult, numLambdas)(_ * lambdaMult)
     (lambdas, beta0)
   }
 
-  private class ComputeInitialWeights(p: Double) {
-    val w = p * (1.0 - p)
+  private class ComputeInitialWeights(p: Double, numFeatures: Int) extends Serializable {
 
-    def aggregate(labels: Array[Double], xNormalized: Array[Array[Double]], nrow: Int, ncol: Int): (Array[Double], Array[Double], Double, Double) = {
-      var sumWxr = Array.ofDim[Double](ncol)
-      var sumWxx = Array.ofDim[Double](ncol)
-      var sumWr = 0.0
-      var sumW = 0.0
+    lazy val sumWxr = Vectors.zeros(numFeatures)
+    var sumWr = 0.0
 
-      for (iRow <- 0 until nrow) {
-        //residual for logistic
-        val r = (labels(iRow) - p) / w
-        val x = xNormalized(iRow)
-        val wr = w * r
-        sumWxr = (for (i <- 0 until ncol) yield (sumWxr(i) + wr * x(i))).toArray
-        sumWxx = (for (i <- 0 until ncol) yield (sumWxx(i) + w * x(i) * x(i))).toArray
-        sumWr = sumWr + wr
-        sumW = sumW + w
-      }
-      (sumWxr, sumWxx, sumWr, sumW)
+    def compute(row: (Double, Vector)): this.type = {
+      val y = row._1
+      val x = row._2
+      val wr = y - p
+      BLAS.axpy(wr, x, sumWxr)
+      sumWr += wr
+      this
+    }
+
+    def combine(other: ComputeInitialWeights): this.type = {
+      sumWxr.toBreeze :+= other.sumWxr.toBreeze
+      sumWr += other.sumWr
+      this
     }
   }
 
