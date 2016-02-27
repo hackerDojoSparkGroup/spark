@@ -57,13 +57,10 @@ object LogisticCoordinateDescent extends Logging {
   def runCD(data: RDD[(Double, Vector)], initialWeights: Vector, alpha: Double, lamShrnk: Double, numLambdas: Int, maxIter: Int, tol: Double, stats: Stats3, numRows: Long): List[(Double, Vector)] = {
     logInfo(s"Performing coordinate descent with: [elasticNetParam: $alpha, lamShrnk: $lamShrnk, numLambdas: $numLambdas, maxIter: $maxIter, tol: $tol]")
 
-    val (labelsSeq, xNormalizedSeq) = data.collect.unzip
-    val labels = labelsSeq.toArray
-    val xNormalized = xNormalizedSeq.map(_.toArray).toArray
     val lamMult = 0.93
 
     val (lambdas, initialBeta0) = computeLambdasAndInitialBeta0(data, alpha, lamMult, numLambdas, stats, numRows)
-    val lambdasAndBetas = optimize(labels, xNormalized, lambdas, initialBeta0, alpha, stats, numRows)
+    val lambdasAndBetas = optimize(data, lambdas, initialBeta0, alpha, stats, numRows)
 
     //TODO - Return the column order and put that into the model as part of the history. Or better yet, 
     // columnOrder should be calculated in the example code from the List of models containing the beta history using a util class
@@ -87,7 +84,7 @@ object LogisticCoordinateDescent extends Logging {
 
     val avgWxr = sumWxr.toBreeze / numRows.toDouble
     val maxWxr = avgWxr.map(abs).max(Ordering.Double)
-    
+
     // calculate starting value for lambda
     val lamdaInit = maxWxr / alpha
 
@@ -98,29 +95,9 @@ object LogisticCoordinateDescent extends Logging {
     (lambdas, beta0)
   }
 
-  private class ComputeInitialWeights(p: Double, numFeatures: Int) extends Serializable {
-
-    lazy val sumWxr = Vectors.zeros(numFeatures)
-    var sumWr = 0.0
-
-    def compute(row: (Double, Vector)): this.type = {
-      val y = row._1
-      val x = row._2
-      val wr = y - p
-      BLAS.axpy(wr, x, sumWxr)
-      sumWr += wr
-      this
-    }
-
-    def combine(other: ComputeInitialWeights): this.type = {
-      sumWxr.toBreeze :+= other.sumWxr.toBreeze
-      sumWr += other.sumWr
-      this
-    }
-  }
-
-  private def optimize(labels: Array[Double], xNormalized: Array[Array[Double]], lambdas: Array[Double], initialBeta0: Double, alpha: Double, stats: Stats3, numRows: Long): List[(Double, Vector)] = {
+  private def optimize(data: RDD[(Double, Vector)], lambdas: Array[Double], initialBeta0: Double, alpha: Double, stats: Stats3, numRows: Long): List[(Double, Vector)] = {
     //initial value of lambda corresponds to beta = list of 0's
+    //TODO - Convert beta to Vector
     var beta = Array.ofDim[Double](stats.numFeatures)
     val beta0 = initialBeta0
 
@@ -141,7 +118,7 @@ object LogisticCoordinateDescent extends Logging {
     def loop(oldBeta: Array[Double], n: Int): Unit = {
       if (n < lambdas.length) {
         val newLambda = lambdas(n)
-        val newBeta = outerLoop(n + 1, labels, xNormalized, oldBeta, beta0, newLambda, alpha, stats.numFeatures, numRows)
+        val newBeta = outerLoop(n + 1, data, oldBeta, beta0, newLambda, alpha, stats.numFeatures, numRows)
         betaMat += newBeta.clone
         beta0List += beta0
         loop(newBeta, n + 1)
@@ -155,20 +132,28 @@ object LogisticCoordinateDescent extends Logging {
     lambdas.zip(fullBetas).toList
   }
 
-  private def outerLoop(iStep: Int, labels: Array[Double], xNormalized: Array[Array[Double]], oldBeta: Array[Double], beta0: Double, lambda: Double, alpha: Double, numColumns: Int, numRows: Long): Array[Double] = {
+  private def outerLoop(iStep: Int, data: RDD[(Double, Vector)], oldBeta: Array[Double], beta0: Double, lambda: Double, alpha: Double, numFeatures: Int, numRows: Long): Array[Double] = {
     //Use incremental change in betas to control inner iteration
     //set middle loop values for betas = to outer values
     // values are used for calculating weights and probabilities
     //inner values are used for calculating penalized regression updates
     //take pass through data to calculate averages over data require for iteration
-    //initilize accumulators
+    //initialize accumulators
 
-    val (wXX, wX, wXz, wZ, wSum) = calcOuter(xNormalized, labels, beta0, oldBeta)
+    val outer = data.treeAggregate(new CalculateOuter(beta0, oldBeta, numFeatures))(
+      (aggregate, row) => aggregate.compute(row),
+      (aggregate1, aggregate2) => aggregate1.combine(aggregate2))
+
+    val wXX = outer.wXX
+    val wX = outer.wX
+    val wXz = outer.wXz
+    val wZ = outer.wZ
+    val wSum = outer.wSum
 
     def loop(iterIRLS: Int, betaIRLS: Array[Double], distIRLS: Double): Array[Double] = {
       if (distIRLS <= 0.01) betaIRLS
       else {
-        val (newBetaIRLS, newDistIRLS) = middleLoop(iStep, iterIRLS, betaIRLS, beta0, wXX, wX, wXz, wZ, wSum, lambda, alpha, numColumns, numRows)
+        val (newBetaIRLS, newDistIRLS) = middleLoop(iStep, iterIRLS, betaIRLS, beta0, wXX, wX, wXz, wZ, wSum, lambda, alpha, numFeatures, numRows)
         loop(0, newBetaIRLS, newDistIRLS)
       }
     }
@@ -229,50 +214,6 @@ object LogisticCoordinateDescent extends Logging {
     else if (z > 0.0) z - gamma
     else z + gamma
 
-  private def Pr(b0: Double, b: Array[Double], x: Array[Double]): Double = {
-    val n = x.length
-    var sum = b0
-    for (i <- 0 until n) {
-      sum += b(i) * x(i)
-      sum = if (sum < -100) -100 else sum
-    }
-    1.0 / (1.0 + exp(-sum))
-  }
-
-  // performs adjustments recommended by Friedman for numerical stability
-  def adjPW(b0: Double, b: Array[Double], x: Array[Double]): (Double, Double) = {
-    val pr = Pr(b0, b, x)
-    if (abs(pr) < 1e-5) (0.0, 1e-5)
-    else if (abs(1.0 - pr) < 1e-5) (1.0, 1e-5)
-    else (pr, pr * (1.0 - pr))
-  }
-
-  def calcOuter(X: Array[Array[Double]], Y: Array[Double], beta0: Double, beta: Array[Double]) = {
-    val nRow = X.length
-    val nCol = X(0).length
-
-    var wXX = DenseMatrix.zeros[Double](nCol, nCol)
-    var wX = DenseVector.zeros[Double](nCol)
-    var wXz = DenseVector.zeros[Double](nCol)
-    var wZ = 0.0
-    var wSum = 0.0
-
-    for (iRow <- 0 until nRow) {
-      val y = Y(iRow)
-      val x = X(iRow)
-      val (p, w) = adjPW(beta0, beta, x)
-      val xNP = DenseVector(x)
-      wXX += w * (xNP * xNP.t)
-      wX += w * xNP
-      // residual for logistic
-      val z = (y - p) / w + beta0 + (for (i <- 0 until nCol) yield (x(i) * beta(i))).sum
-      wXz += w * xNP * z
-      wZ += w * z
-      wSum += w
-    }
-    (wXX, wX, wXz, wZ, wSum)
-  }
-
   private def determineColumnOrder(betas: List[Vector]): Array[Int] = {
     val nzList = betas
       .map(_.toArray.drop(1).zipWithIndex.filter(_._1 != 0.0).map(_._2))
@@ -288,3 +229,79 @@ object LogisticCoordinateDescent extends Logging {
     nzList.toArray
   }
 }
+
+private class ComputeInitialWeights(p: Double, numFeatures: Int) extends Serializable {
+
+  lazy val sumWxr = Vectors.zeros(numFeatures)
+  var sumWr = 0.0
+
+  def compute(row: (Double, Vector)): this.type = {
+    val y = row._1
+    val x = row._2
+    val wr = y - p
+    BLAS.axpy(wr, x, sumWxr)
+    sumWr += wr
+    this
+  }
+
+  def combine(other: ComputeInitialWeights): this.type = {
+    sumWxr.toBreeze :+= other.sumWxr.toBreeze
+    sumWr += other.sumWr
+    this
+  }
+}
+
+//TODO - Convert beta to Vector and broadcast beta
+//TODO - Improve efficiency of operations in CalculateOuter
+private class CalculateOuter(beta0: Double, beta: Array[Double], numFeatures: Int) extends Serializable {
+
+  lazy val wXX = DenseMatrix.zeros[Double](numFeatures, numFeatures)
+  lazy val wX = DenseVector.zeros[Double](numFeatures)
+  lazy val wXz = DenseVector.zeros[Double](numFeatures)
+  var wZ = 0.0
+  var wSum = 0.0
+
+  def compute(row: (Double, Vector)): this.type = {
+    val y = row._1
+    val x = row._2.toArray
+    val (p, w) = adjPW(beta0, beta, x)
+    val xNP = DenseVector(x)
+    wXX += w * (xNP * xNP.t)
+    wX += w * xNP
+    // residual for logistic
+    val z = (y - p) / w + beta0 + (for (i <- 0 until numFeatures) yield (x(i) * beta(i))).sum
+    wXz += w * xNP * z
+    wZ += w * z
+    wSum += w
+    this
+  }
+
+  def combine(other: CalculateOuter): this.type = {
+    wXX :+= other.wXX
+    wX :+= other.wX
+    wXz :+= other.wXz
+    wZ += other.wZ
+    wSum += other.wSum
+    this
+  }
+
+  // performs adjustments recommended by Friedman for numerical stability
+  private def adjPW(b0: Double, b: Array[Double], x: Array[Double]): (Double, Double) = {
+    val pr = Pr(b0, b, x)
+    if (abs(pr) < 1e-5) (0.0, 1e-5)
+    else if (abs(1.0 - pr) < 1e-5) (1.0, 1e-5)
+    else (pr, pr * (1.0 - pr))
+  }
+
+  private def Pr(b0: Double, b: Array[Double], x: Array[Double]): Double = {
+    val n = x.length
+    var sum = b0
+    var j = 0
+    while (j < n) {
+      sum += b(j) * x(j)
+      sum = if (sum < -100) -100 else sum
+      j += 1
+    }
+    1.0 / (1.0 + exp(-sum))
+  }
+}  
